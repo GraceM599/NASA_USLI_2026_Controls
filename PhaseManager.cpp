@@ -217,7 +217,7 @@ void updateFlightPhase(State& currentState, float groundAltitude, KalmanFilter& 
         case ARMED: {
             // ================================================================
             // LIFTOFF DETECTION: ARMED → POWERED_ASCENT
-            // Fast and robust: Require BOTH high acceleration AND altitude gain
+            // Require BOTH high acceleration AND altitude gain
             // ================================================================
             bool highAcceleration = (accelMagnitude > LIFTOFF_ACCEL_THRESHOLD);
             bool altitudeGain = (currentState.estimatedAltitude > LIFTOFF_ALT_THRESHOLD);
@@ -241,7 +241,7 @@ void updateFlightPhase(State& currentState, float groundAltitude, KalmanFilter& 
         case POWERED_ASCENT: {
             // ================================================================
             // BURNOUT DETECTION: POWERED_ASCENT → COASTING
-            // Simple and reliable: Just use motor burn time
+            // Motor burn time
             // ================================================================
             bool minBurnTime = ((now - liftoffTime) > BURNOUT_TIME_MIN);
             
@@ -315,7 +315,7 @@ void updateFlightPhase(State& currentState, float groundAltitude, KalmanFilter& 
         case DESCENT: {
             // ================================================================
             // LANDING DETECTION: DESCENT → LANDED
-            // Robust detection: altitude and velocity must be STABLE
+            // altitude and velocity must be STABLE
             // Check if values barely change over last N samples
             // ================================================================
             
