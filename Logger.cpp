@@ -26,7 +26,7 @@ unsigned long* loggingStartTimePtr = nullptr;
 // TIMING CONFIGURATION
 // ============================================================================
 
-#define FLUSH_INTERVAL 1000000   // 1 Hz (in microseconds)
+#define FLUSH_INTERVAL 2000000   // 2 Hz (in microseconds)
 
 // ============================================================================
 // INITIALIZATION
@@ -247,7 +247,7 @@ void checkFlushNeeded(const char* phaseNames[]) {
     bool bufferNearFull = pending > (LOG_BUFFER_SIZE * 0.75);
     bool timeToFlush = (now - lastFlush) >= FLUSH_INTERVAL;
     
-    if ((timeToFlush || bufferNearFull) && pending > 0) {
+    if ((bufferNearFull) && pending > 0) {
         flushLogBuffer(phaseNames);
     }
 }
