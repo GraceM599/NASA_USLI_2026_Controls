@@ -2,19 +2,6 @@
  * ============================================================================
  * APOGEE CONTROL SYSTEM (ACS) NASA USLI CONTROLS 2026
  * ============================================================================
- * 
- * Hardware:
- * - Teensy 4.1
- * - MTi IMU (I2C address 0x6B, DRDY on pin 20)
- * - BMP390 Barometer (I2C)
- * - Ultimate GPS V3
- * - Servo/Airbrake actuator (TODO)
- * - SD Card (built-in)
- * 
- * Architecture:
- * - Multi-rate sensor reading with hardware timers
- * - Two separate buffers: logging (SD) and phase detection (analysis)
- * - State machine for flight phase management
  */
 
 #include <Wire.h>
@@ -26,6 +13,7 @@
 #include "Debug.h"
 #include "PhaseManager.h"
 #include "Sensors.h"
+#include "GPS.h"
 #include "KalmanFilter.h"
 #include <ArduinoEigenDense.h>
 using namespace Eigen;
@@ -38,18 +26,10 @@ using namespace Eigen;
 // Pin definitions
 #define IMU_DRDY_PIN 20
 #define BUZZER_PIN 33
-// #define GPS_SERIAL Serial8     // TODO: GPS connected to Serial8
 // #define SERVO_PIN 9            // TODO: Airbrake servo pin
 
 // I2C addresses
 #define IMU_ADDRESS 0x6B
-
-// TODO: GPS Configuration
-// #define GPS_BAUD_INITIAL 9600
-// #define GPS_BAUD_OPERATING 115200
-// #define PMTK_SET_NMEA_OUTPUT_RMCGGA "$PMTK314,0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0*28\r\n"
-// #define PMTK_SET_NMEA_UPDATE_10HZ "$PMTK220,100*2F\r\n"
-// #define PMTK_SET_BAUD_115200 "$PMTK251,115200*1F\r\n"
 
 // ============================================================================
 // TIMING CONFIGURATION (microseconds)
@@ -57,7 +37,8 @@ using namespace Eigen;
 
 #define IMU_INTERVAL      5000      // 200 Hz
 #define BARO_INTERVAL     10000     // 100 Hz
-#define CONTROL_INTERVAL  10000     // 100 Hz
+#define CONTROL_INTERVAL  34000     // every 34 ms
+#define GPS_INTERVAL      100000   // 10 Hz 
 
 unsigned long loggingStartTime = 0;
 
@@ -69,7 +50,7 @@ unsigned long loggingStartTime = 0;
 // #define PID_KP 1.0
 // #define PID_KI 0.1
 // #define PID_KD 0.05
-// #define TARGET_APOGEE 4600.0  // meters AG
+// #define TARGET_APOGEE 4600.0  // meters AGL
 
 // ============================================================================
 // GLOBAL OBJECTS
@@ -82,35 +63,52 @@ State currentState = {0};
 volatile bool imuReady = false;
 volatile bool baroReady = false;
 volatile bool controlReady = false;
+volatile bool gpsReady = false;
 
 // Timers
 IntervalTimer imuTimer;
 IntervalTimer baroTimer;
 IntervalTimer controlTimer;
+IntervalTimer gpsTimer;
 
 // Kalman Filter
 KalmanFilter KF;
 unsigned long lastKalmanTime = 0;
 
+// GPS
+// Create GPS object (using Serial8)
+GPS gps(Serial8);
+
 // ============================================================================
 // INTERRUPT SERVICE ROUTINES (ISRs)
 // ============================================================================
 
+
+//volatile unsigned long imuCount = 0;
+//volatile unsigned long baroCount = 0;
+//olatile unsigned long controlCount = 0;
+//volatile unsigned long gpsCount = 0;
+
+// Update each ISR to increment counters
 void imuISR() {
-    imuReady = true;  // Just set flag, don't do work in ISR
+    imuReady = true;
+    //imuCount++;
 }
 
 void baroISR() {
     baroReady = true;
+    //baroCount++;
 }
 
 void controlISR() {
     controlReady = true;
+    //controlCount++;
 }
 
-// ============================================================================
-// INITIALIZATION
-// ============================================================================
+void gpsISR() {
+    gpsReady = true;
+    //gpsCount++;
+}
 
 // ============================================================================
 // SET UP
@@ -161,10 +159,7 @@ void setup() {
     logFile.print("gyroX,gyroY,gyroZ,");
     logFile.print("baroAlt,baroPressure,baroTemp,");
     logFile.print("AGL,KFalt,KFvel,");
-    logFile.print("gpsLat,gpsLon,gpsAlt,gpsSpeed,gpsSats,gpsFixOK,");
-
-    // TODO: Add control column
-    // logFile.print("control,");
+    logFile.print("gpsLat,gpsLon,gpsAlt,gpsSpeed,gpsSats,gpsFix,");
     logFile.println("phase");
     logFile.flush();
     
@@ -201,10 +196,57 @@ void setup() {
     // ========================================================================
     // Initialize GPS (Ultimate GPS V3)
     // ========================================================================
-    if (!initializeGPS()) {
-        DEBUG_PRINTLN("WARNING: GPS initialization failed!");
+
+    DEBUG_PRINTLN("Initializing GPS...");
+    logDebugMessage("Initializing GPS...");
+    gps.begin();
+
+    
+    // Wait for GPS fix with feedback
+    DEBUG_PRINTLN("Waiting for GPS fix...");
+    logDebugMessage("Waiting for GPS");
+    bool hasFix = false;
+    unsigned long gpsWaitStart = millis();
+    unsigned long lastBeep = 0;
+
+    while (!hasFix && (millis() - gpsWaitStart < 60000)) {  // Wait max 60 seconds
+        gps.update();
+        gps.updateState(currentState);
+    
+        if (currentState.gpsHasFix && currentState.gpsSatellites >= 4) {
+            hasFix = true;
+            DEBUG_PRINTLN("GPS FIX ACQUIRED!");
+            DEBUG_PRINT("Satellites: "); DEBUG_PRINTLN(currentState.gpsSatellites);
+            logDebugMessage("Satellites: ", currentState.gpsSatellites);
+        
+            // Success beep pattern: 3 quick beeps
+            for (int i = 0; i < 3; i++) {
+                tone(BUZZER_PIN, 2000, 100);
+                delay(150);
+            }
+        } else {
+            // Beep every 2 seconds while waiting
+            if (millis() - lastBeep > 2000) {
+                tone(BUZZER_PIN, 1000, 100);  // Low beep = still searching
+                lastBeep = millis();
+                DEBUG_PRINT("Searching... Sats: "); DEBUG_PRINTLN(currentState.gpsSatellites);
+                logDebugMessage("Searching... Sats: ", currentState.gpsSatellites);
+            }
+        }
+    
+        delay(100);
     }
 
+    if (!hasFix) {
+        DEBUG_PRINTLN("WARNING: GPS fix not acquired, continuing anyway...");
+        logDebugMessage("WARNING: GPS fix not acquired, continuing anyway...");
+        // Warning beep pattern: 5 short beeps
+        for (int i = 0; i < 5; i++) {
+            tone(BUZZER_PIN, 500, 50);
+            delay(100);
+        }
+    }
+    
     // Perform IMU tare (bias removal)
     #ifdef ENABLE_IMU_TARE
     performIMUTare();
@@ -215,6 +257,7 @@ void setup() {
     performBarometerTare();
     #endif
 
+    
 
     KF.initialize(0.0f);
     currentState.estimatedAltitude = 0.0f;
@@ -263,7 +306,7 @@ void setup() {
     logDebugMessage(">>> SYSTEM ARMED <<< Waiting for liftoff detection...");
     
     // Beep confirmation
-    //tone(BUZZER_PIN, 2000, 500);
+    tone(BUZZER_PIN, 2000, 100);
     //delay(1000);
     
     // ========================================================================
@@ -275,6 +318,7 @@ void setup() {
     imuTimer.begin(imuISR, IMU_INTERVAL);
     baroTimer.begin(baroISR, BARO_INTERVAL);
     controlTimer.begin(controlISR, CONTROL_INTERVAL);
+    gpsTimer.begin(gpsISR, GPS_INTERVAL);
     
     DEBUG_PRINTLN("Flight computer running!");
     DEBUG_PRINTLN("========================================\n");
@@ -288,6 +332,51 @@ void setup() {
 // ============================================================================
 
 void loop() {
+
+    // for checking each interval time
+    /*
+    static unsigned long lastLoopTime = 0;
+    static unsigned long loopStartTime = micros();
+    static int loopCount = 0;
+    
+    // At the very start of loop
+    unsigned long now = micros();
+    unsigned long loopDuration = now - lastLoopTime;
+    lastLoopTime = now;
+    
+    if (++loopCount > 1000) {
+        Serial.print("Loop interval: "); Serial.print(loopDuration);
+        Serial.println(" us");
+        loopCount = 0;
+    }
+    
+
+
+    static unsigned long lastRateCheck = 0;
+    static unsigned long lastImuCount = 0;
+    static unsigned long lastBaroCount = 0;
+    static unsigned long lastControlCount = 0;
+    static unsigned long lastGpsCount = 0;
+
+    if (millis() - lastRateCheck >= 1000) {
+        unsigned long imuRate = imuCount - lastImuCount;
+        unsigned long baroRate = baroCount - lastBaroCount;
+        unsigned long controlRate = controlCount - lastControlCount;
+        unsigned long gpsRate = gpsCount - lastGpsCount;
+    
+        Serial.print("Rates - IMU: "); Serial.print(imuRate);
+        Serial.print(" Hz | Baro: "); Serial.print(baroRate);
+        Serial.print(" Hz | Control: "); Serial.print(controlRate);
+        Serial.print(" Hz | GPS: "); Serial.println(gpsRate);
+    
+        lastImuCount = imuCount;
+        lastBaroCount = baroCount;
+        lastControlCount = controlCount;
+        lastGpsCount = gpsCount;
+        lastRateCheck = millis();
+    }
+    */
+    
     // ========================================================================
     // PATH 1: IMU (500 Hz)
     // Fast prediction updates for Kalman filters
@@ -299,7 +388,6 @@ void loop() {
     
     // ========================================================================
     // PATH 2: BAROMETER (100 Hz)
-    // Measurement updates for altitude Kalman filter
     // ========================================================================
     if (baroReady) {
         baroReady = false;
@@ -307,16 +395,47 @@ void loop() {
     }
     
     // ========================================================================
-    // PATH 3: GPS (~10 Hz, asynchronous)
-    // TODO: Implement when GPS is added
+    // PATH 3: GPS (~10 Hz)
     // ========================================================================
-    
-    readGPS(currentState);
+    gps.update();
+    gps.updateState(currentState);
+
+    //if (gpsReady) {
+        //Serial.println("GPS READY!"); // to check if gps is ready
+        //gpsReady = false;
+        //gps.update();
+        //gps.updateState(currentState);
+    //}
+
     
     // ========================================================================
     // PATH 4: CONTROL LOOP (100 Hz)
     // Main control & logging happens here
     // ========================================================================
+    
+    // temp test
+    /*
+    if (controlReady) {
+    static unsigned long controlProcessCount = 0;
+    static unsigned long lastControlReport = 0;
+    
+    controlProcessCount++;
+    
+    if (millis() - lastControlReport >= 1000) {
+        Serial.print("Control PROCESSED: "); 
+        Serial.print(controlProcessCount); 
+        Serial.println(" times/sec");
+        controlProcessCount = 0;
+        lastControlReport = millis();
+    }
+    
+    controlReady = false;
+    updateFlightPhase(currentState, groundAltitude, KF);
+    addLogEntry(currentState, currentPhase, groundAltitude, loggingStartTime);
+    } 
+    */
+
+    
     if (controlReady) {
         controlReady = false;
         
@@ -340,7 +459,7 @@ void loop() {
             
             // Placeholder for now
             //controlOutput = 0.0f;
-        }
+        
         
         // ────────────────────────────────────────────────────────────────────
         // STEP 3: Command actuators
@@ -354,8 +473,7 @@ void loop() {
         // ────────────────────────────────────────────────────────────────────
         
         addLogEntry(currentState, currentPhase, groundAltitude, loggingStartTime);
-        
-        
+
         // ────────────────────────────────────────────────────────────────────
         // STEP 5: Print debug info periodically
         // ────────────────────────────────────────────────────────────────────
@@ -383,27 +501,46 @@ void loop() {
             //DEBUG_PRINTLN(" C");
 
             // GPS
-            DEBUG_PRINT(" lat = "); DEBUG_PRINT2(currentState.gpsLat, 2);
-            DEBUG_PRINT(" lon = "); DEBUG_PRINT2(currentState.gpsLon, 2);
-            DEBUG_PRINT(" Sat = "); DEBUG_PRINT(currentState.gpsSatellites);
-            DEBUG_PRINT(" Fix = "); DEBUG_PRINT(currentState.gpsHasFix);
-
+            
+            DEBUG_PRINT(" Lat: "); DEBUG_PRINT2(currentState.gpsLat, 6);
+            DEBUG_PRINT(" Lon: "); DEBUG_PRINT2(currentState.gpsLon, 6);
+            DEBUG_PRINT(" Alt: "); DEBUG_PRINT2(currentState.gpsAltitude, 1);
+            DEBUG_PRINT(" Spd: "); DEBUG_PRINT2(currentState.gpsSpeed, 1);
+            DEBUG_PRINT(" Sats: "); DEBUG_PRINT(currentState.gpsSatellites);
+            DEBUG_PRINT(" Fix: "); DEBUG_PRINTLN(currentState.gpsHasFix);
+            
+            
             // Flight phase
-            DEBUG_PRINT("Phase: "); DEBUG_PRINTLN(phaseNames[currentPhase]);
+            //DEBUG_PRINT("Phase: "); DEBUG_PRINTLN(phaseNames[currentPhase]);
 
             lastPrint = millis();
             // TODO: Add GPS fields here if enabled
         }
         #endif
+    }
 
     
     // ========================================================================
     // PATH 5: SD CARD FLUSH (~1 Hz)
     // Periodic write to SD card (doesn't block control loop)
     // ========================================================================
+    
     #ifndef DEBUG_NO_SD
     checkFlushNeeded(phaseNames);
     #endif
+       
+    // For checking flush interval
+    /*
+    unsigned long flushStart = micros();
+    checkFlushNeeded(phaseNames);
+    unsigned long flushTime = micros() - flushStart;
+
+    static unsigned long lastFlushPrint = 0;
+    if (flushTime > 1000 && millis() - lastFlushPrint > 1000) {
+        Serial.print("FLUSH TOOK: "); Serial.print(flushTime); Serial.println(" us");
+        lastFlushPrint = millis();
+    }
+    */
     
     // ========================================================================
     // PATH 6: SHUTDOWN DETECTION
@@ -411,6 +548,7 @@ void loop() {
     if (currentPhase == LANDED) {
         // Force final flush
         DEBUG_PRINTLN("Flight complete. Flushing final data...");
+        logDebugMessage("Flight complete. Flushing final data...");
         #ifndef DEBUG_NO_SD
         flushLogBuffer(phaseNames);
         
@@ -419,9 +557,10 @@ void loop() {
         #endif
         
         // Beep to indicate complete
-        //tone(BUZZER_PIN, 1000, 1000);
+        tone(BUZZER_PIN, 1000, 100);
         
         DEBUG_PRINTLN("Flight computer shutdown. Remove power to reset.");
+        logDebugMessage("Flight computer shutdown. Remove power to reset.");
         
         // Stay in infinite loop (or enter low-power mode)
         while (1) {
