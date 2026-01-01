@@ -14,7 +14,9 @@
 #include "PhaseManager.h"
 #include "Sensors.h"
 #include "GPS.h"
+#include "Config.h"
 #include "KalmanFilter.h"
+#include "ApogeeController.h"
 #include <ArduinoEigenDense.h>
 using namespace Eigen;
 
@@ -35,10 +37,11 @@ using namespace Eigen;
 // TIMING CONFIGURATION (microseconds)
 // ============================================================================
 
-#define IMU_INTERVAL      5000      // 200 Hz
-#define BARO_INTERVAL     10000     // 100 Hz
-#define CONTROL_INTERVAL  34000     // every 34 ms
-#define GPS_INTERVAL      100000   // 10 Hz 
+//#define IMU_INTERVAL      5000      // 200 Hz
+//#define BARO_INTERVAL     10000     // 100 Hz
+//#define CONTROL_INTERVAL  136000     // every 34 ms
+//static unsigned long lastRead = 0;
+//#define GPS_INTERVAL      100000   // 10 Hz             // move this to config.h
 
 unsigned long loggingStartTime = 0;
 
@@ -66,8 +69,8 @@ volatile bool controlReady = false;
 volatile bool gpsReady = false;
 
 // Timers
-IntervalTimer imuTimer;
-IntervalTimer baroTimer;
+//IntervalTimer imuTimer;
+//IntervalTimer baroTimer;
 IntervalTimer controlTimer;
 IntervalTimer gpsTimer;
 
@@ -79,36 +82,8 @@ unsigned long lastKalmanTime = 0;
 // Create GPS object (using Serial8)
 GPS gps(Serial8);
 
-// ============================================================================
-// INTERRUPT SERVICE ROUTINES (ISRs)
-// ============================================================================
-
-
-//volatile unsigned long imuCount = 0;
-//volatile unsigned long baroCount = 0;
-//olatile unsigned long controlCount = 0;
-//volatile unsigned long gpsCount = 0;
-
-// Update each ISR to increment counters
-void imuISR() {
-    imuReady = true;
-    //imuCount++;
-}
-
-void baroISR() {
-    baroReady = true;
-    //baroCount++;
-}
-
-void controlISR() {
-    controlReady = true;
-    //controlCount++;
-}
-
-void gpsISR() {
-    gpsReady = true;
-    //gpsCount++;
-}
+// PID
+ApogeeController ACS;
 
 // ============================================================================
 // SET UP
@@ -201,7 +176,7 @@ void setup() {
     logDebugMessage("Initializing GPS...");
     gps.begin();
 
-    
+    /*
     // Wait for GPS fix with feedback
     DEBUG_PRINTLN("Waiting for GPS fix...");
     logDebugMessage("Waiting for GPS");
@@ -247,6 +222,7 @@ void setup() {
         }
     }
     
+    */
     // Perform IMU tare (bias removal)
     #ifdef ENABLE_IMU_TARE
     performIMUTare();
@@ -256,8 +232,6 @@ void setup() {
     #ifdef ENABLE_BARO_TARE
     performBarometerTare();
     #endif
-
-    
 
     KF.initialize(0.0f);
     currentState.estimatedAltitude = 0.0f;
@@ -271,24 +245,10 @@ void setup() {
     currentState.gpsSpeed = 0.0f;
     currentState.gpsSatellites = 0;
     currentState.gpsHasFix = false;
+    
+    // Controller
+    ACS.initialize();
 
-    
-    // ========================================================================
-    // TODO: Initialize PID Controller
-    // ========================================================================
-    // DEBUG_PRINTLN("Initializing PID controller...");
-    // pidController.setGains(PID_KP, PID_KI, PID_KD);
-    // pidController.setTargetApogee(TARGET_APOGEE);
-    // DEBUG_PRINTLN("PID controller initialized!");
-    
-    // ========================================================================
-    // TODO: Initialize Airbrake/Servo
-    // ========================================================================
-    // DEBUG_PRINTLN("Initializing airbrake...");
-    // airbrake.attach(SERVO_PIN);
-    // airbrake.write(0);  // Retracted position
-    // DEBUG_PRINTLN("Airbrake initialized (retracted)!");
-    
     // ========================================================================
     // System Ready - Auto-arm and start
     // ========================================================================
@@ -306,7 +266,7 @@ void setup() {
     logDebugMessage(">>> SYSTEM ARMED <<< Waiting for liftoff detection...");
     
     // Beep confirmation
-    tone(BUZZER_PIN, 2000, 100);
+    //tone(BUZZER_PIN, 2000, 100);
     //delay(1000);
     
     // ========================================================================
@@ -315,10 +275,10 @@ void setup() {
     DEBUG_PRINTLN("Starting timers...");
     logDebugMessage("Starting timers...");
     
-    imuTimer.begin(imuISR, IMU_INTERVAL);
-    baroTimer.begin(baroISR, BARO_INTERVAL);
-    controlTimer.begin(controlISR, CONTROL_INTERVAL);
-    gpsTimer.begin(gpsISR, GPS_INTERVAL);
+    //imuTimer.begin(imuISR, IMU_INTERVAL);
+    //baroTimer.begin(baroISR, BARO_INTERVAL);
+    //controlTimer.begin(controlISR, CONTROL_INTERVAL);
+    //gpsTimer.begin(gpsISR, GPS_INTERVAL);
     
     DEBUG_PRINTLN("Flight computer running!");
     DEBUG_PRINTLN("========================================\n");
@@ -332,157 +292,46 @@ void setup() {
 // ============================================================================
 
 void loop() {
-
-    // for checking each interval time
-    /*
-    static unsigned long lastLoopTime = 0;
-    static unsigned long loopStartTime = micros();
-    static int loopCount = 0;
+    //DEBUG_PRINT("Time: ");
+    //DEBUG_PRINTLN2((micros() - loggingStartTime)/1000000.0, 6);
     
-    // At the very start of loop
-    unsigned long now = micros();
-    unsigned long loopDuration = now - lastLoopTime;
-    lastLoopTime = now;
-    
-    if (++loopCount > 1000) {
-        Serial.print("Loop interval: "); Serial.print(loopDuration);
-        Serial.println(" us");
-        loopCount = 0;
-    }
-    
-
-
-    static unsigned long lastRateCheck = 0;
-    static unsigned long lastImuCount = 0;
-    static unsigned long lastBaroCount = 0;
-    static unsigned long lastControlCount = 0;
-    static unsigned long lastGpsCount = 0;
-
-    if (millis() - lastRateCheck >= 1000) {
-        unsigned long imuRate = imuCount - lastImuCount;
-        unsigned long baroRate = baroCount - lastBaroCount;
-        unsigned long controlRate = controlCount - lastControlCount;
-        unsigned long gpsRate = gpsCount - lastGpsCount;
-    
-        Serial.print("Rates - IMU: "); Serial.print(imuRate);
-        Serial.print(" Hz | Baro: "); Serial.print(baroRate);
-        Serial.print(" Hz | Control: "); Serial.print(controlRate);
-        Serial.print(" Hz | GPS: "); Serial.println(gpsRate);
-    
-        lastImuCount = imuCount;
-        lastBaroCount = baroCount;
-        lastControlCount = controlCount;
-        lastGpsCount = gpsCount;
-        lastRateCheck = millis();
-    }
-    */
-    
-    // ========================================================================
-    // PATH 1: IMU (500 Hz)
-    // Fast prediction updates for Kalman filters
-    // ========================================================================
-    if (imuReady) {
-        imuReady = false;
-        readIMU(currentState);
-    }
-    
-    // ========================================================================
-    // PATH 2: BAROMETER (100 Hz)
-    // ========================================================================
-    if (baroReady) {
-        baroReady = false;
-        readBarometer(currentState);
-    }
-    
-    // ========================================================================
-    // PATH 3: GPS (~10 Hz)
-    // ========================================================================
+    readIMU(currentState);
+    readBarometer(currentState);
     gps.update();
     gps.updateState(currentState);
-
-    //if (gpsReady) {
-        //Serial.println("GPS READY!"); // to check if gps is ready
-        //gpsReady = false;
-        //gps.update();
-        //gps.updateState(currentState);
-    //}
-
     
-    // ========================================================================
-    // PATH 4: CONTROL LOOP (100 Hz)
-    // Main control & logging happens here
-    // ========================================================================
-    
-    // temp test
-    /*
-    if (controlReady) {
-    static unsigned long controlProcessCount = 0;
-    static unsigned long lastControlReport = 0;
-    
-    controlProcessCount++;
-    
-    if (millis() - lastControlReport >= 1000) {
-        Serial.print("Control PROCESSED: "); 
-        Serial.print(controlProcessCount); 
-        Serial.println(" times/sec");
-        controlProcessCount = 0;
-        lastControlReport = millis();
-    }
-    
-    controlReady = false;
     updateFlightPhase(currentState, groundAltitude, KF);
-    addLogEntry(currentState, currentPhase, groundAltitude, loggingStartTime);
-    } 
-    */
 
+        // Run controller
+        static float lastPredictedApogee = 0.0f;
+        float flapAngle = ACS.update(currentState, currentPhase);
     
-    if (controlReady) {
-        controlReady = false;
+        // Command servo (TODO: implement)
+        // servo.write(map(flapAngle, 0, 45, 0, 180));
+    
+        // Debug output
+           // Only print when prediction changes (means controller ran)
+        if (ACS.isControlActive()) {
+            float currentPrediction = ACS.getPredictedApogee();
         
-        // ────────────────────────────────────────────────────────────────────
-        // STEP 1: Update flight phase based on current state
-        // ────────────────────────────────────────────────────────────────────
-        updateFlightPhase(currentState, groundAltitude, KF);
-        
-        // ────────────────────────────────────────────────────────────────────
-        // STEP 2: Compute control output (if in active control phase)
-        // ────────────────────────────────────────────────────────────────────
-        //float controlOutput = 0.0f;  // Default: airbrakes retracted
-        
-        //if (shouldControl()) {
-            // TODO: Implement PID control
-            // controlOutput = pidController.compute(
-            //     currentState.estimatedAltitude,
-            //     currentState.estimatedVelocity
-            // );
-            // controlOutput = constrain(controlOutput, 0.0f, 100.0f);
+        if (currentPrediction != lastPredictedApogee) {
+            DEBUG_PRINT("Pred Apogee: "); DEBUG_PRINT(currentPrediction);
+            DEBUG_PRINT(" | Error: "); DEBUG_PRINT(ACS.getApogeeError());
+            DEBUG_PRINT(" | Flap: "); DEBUG_PRINT(flapAngle);
+            DEBUG_PRINT(" | Sim Steps: "); DEBUG_PRINTLN(ACS.getSimulationSteps());
             
-            // Placeholder for now
-            //controlOutput = 0.0f;
-        
-        
-        // ────────────────────────────────────────────────────────────────────
-        // STEP 3: Command actuators
-        // ────────────────────────────────────────────────────────────────────
-        // TODO: Implement actuator control
-        // airbrake.write(map(controlOutput, 0, 100, 0, 180));
-        
-        // ────────────────────────────────────────────────────────────────────
-        // STEP 4: Log complete snapshot of current state
-        // This is the ONLY place where logging happens (100 Hz)
-        // ────────────────────────────────────────────────────────────────────
-        
-        addLogEntry(currentState, currentPhase, groundAltitude, loggingStartTime);
+            lastPredictedApogee = currentPrediction;
+        }
+    }
 
-        // ────────────────────────────────────────────────────────────────────
-        // STEP 5: Print debug info periodically
-        // ────────────────────────────────────────────────────────────────────
+        addLogEntry(currentState, currentPhase, groundAltitude, loggingStartTime);
+   
         #ifdef DEBUG_SENSOR_READINGS
         static unsigned long lastPrint = 0;
-        if (millis() - lastPrint > 500) {                   // set to print every 0.5 sec, but irl it can operate as fast as 31ms
+        if (millis() - lastPrint > 500) {               
             // TIME
             DEBUG_PRINT("Time: ");
-            DEBUG_PRINT2((micros() - loggingStartTime)/1000000.0, 3);
+            DEBUG_PRINT2((micros() - loggingStartTime)/1000000.0, 6);
 
             // IMU
             //DEBUG_PRINT("Accel: X="); DEBUG_PRINT2(currentState.accelX, 3);
@@ -491,33 +340,32 @@ void loop() {
 
             //DEBUG_PRINT("Gyro:  X="); DEBUG_PRINT2(currentState.gyroX, 3);
             //DEBUG_PRINT(" Y="); DEBUG_PRINT2(currentState.gyroY, 3);
-            //DEBUG_PRINT(" Z="); DEBUG_PRINT2(currentState.gyroZ, 3);
+            DEBUG_PRINT(" Z="); DEBUG_PRINT2(currentState.gyroZ, 3);
 
             // Barometer
-            //DEBUG_PRINT(" Alt = "); DEBUG_PRINT2(currentState.baroAltitude, 2);
-            //DEBUG_PRINT(" AGL = "); DEBUG_PRINTLN2(currentState.baroAltitude - groundAltitude, 2);
+            //DEBUG_PRINT(" Alt = "); DEBUG_PRINTLN2(currentState.baroAltitude, 2);
+            DEBUG_PRINT(" AGL = "); DEBUG_PRINTLN2(currentState.baroAltitude - groundAltitude, 2);
             //DEBUG_PRINT(" m | Pressure="); DEBUG_PRINT2(currentState.baroPressure, 2);
             //DEBUG_PRINT(" hPa | Temp="); DEBUG_PRINT2(currentState.baroTemperature, 2);
             //DEBUG_PRINTLN(" C");
 
             // GPS
             
-            DEBUG_PRINT(" Lat: "); DEBUG_PRINT2(currentState.gpsLat, 6);
-            DEBUG_PRINT(" Lon: "); DEBUG_PRINT2(currentState.gpsLon, 6);
-            DEBUG_PRINT(" Alt: "); DEBUG_PRINT2(currentState.gpsAltitude, 1);
-            DEBUG_PRINT(" Spd: "); DEBUG_PRINT2(currentState.gpsSpeed, 1);
-            DEBUG_PRINT(" Sats: "); DEBUG_PRINT(currentState.gpsSatellites);
-            DEBUG_PRINT(" Fix: "); DEBUG_PRINTLN(currentState.gpsHasFix);
+            //DEBUG_PRINT(" Lat: "); DEBUG_PRINT2(currentState.gpsLat, 6);
+            //DEBUG_PRINT(" Lon: "); DEBUG_PRINT2(currentState.gpsLon, 6);
+            //DEBUG_PRINT(" Alt: "); DEBUG_PRINT2(currentState.gpsAltitude, 1);
+            //DEBUG_PRINT(" Spd: "); DEBUG_PRINT2(currentState.gpsSpeed, 1);
+            //DEBUG_PRINT(" Sats: "); DEBUG_PRINT(currentState.gpsSatellites);
+            //DEBUG_PRINT(" Fix: "); DEBUG_PRINTLN(currentState.gpsHasFix);
             
             
             // Flight phase
-            //DEBUG_PRINT("Phase: "); DEBUG_PRINTLN(phaseNames[currentPhase]);
+            DEBUG_PRINT("Phase: "); DEBUG_PRINTLN(phaseNames[currentPhase]);
 
             lastPrint = millis();
-            // TODO: Add GPS fields here if enabled
+            
         }
         #endif
-    }
 
     
     // ========================================================================
@@ -525,26 +373,19 @@ void loop() {
     // Periodic write to SD card (doesn't block control loop)
     // ========================================================================
     
+    
     #ifndef DEBUG_NO_SD
     checkFlushNeeded(phaseNames);
     #endif
-       
-    // For checking flush interval
-    /*
-    unsigned long flushStart = micros();
-    checkFlushNeeded(phaseNames);
-    unsigned long flushTime = micros() - flushStart;
+    //}
+    //}
 
-    static unsigned long lastFlushPrint = 0;
-    if (flushTime > 1000 && millis() - lastFlushPrint > 1000) {
-        Serial.print("FLUSH TOOK: "); Serial.print(flushTime); Serial.println(" us");
-        lastFlushPrint = millis();
-    }
-    */
-    
+    //THIS MIGHT BE THE CAUSE OF THE SLOW
+
     // ========================================================================
     // PATH 6: SHUTDOWN DETECTION
     // ========================================================================
+        
     if (currentPhase == LANDED) {
         // Force final flush
         DEBUG_PRINTLN("Flight complete. Flushing final data...");
@@ -557,7 +398,7 @@ void loop() {
         #endif
         
         // Beep to indicate complete
-        tone(BUZZER_PIN, 1000, 100);
+        //tone(BUZZER_PIN, 1000, 100);
         
         DEBUG_PRINTLN("Flight computer shutdown. Remove power to reset.");
         logDebugMessage("Flight computer shutdown. Remove power to reset.");
@@ -569,33 +410,3 @@ void loop() {
         }
     }
 }
-
-/*
- * ============================================================================
- * TODO: ADDING COMPONENTS LATER
- * ============================================================================
- * 
- * 3. PID CONTROLLER:
- *    - Create PIDController class
- *    - Implement compute() method
- *    - Add anti-windup
- *    - Add derivative filtering
- *    - Tune gains (Kp, Ki, Kd)
- *    - Set target apogee
- *    - Call in control loop when shouldControl() returns true
- * 
- * 4. SERVO/AIRBRAKE:
- *    - Add servo library
- *    - Attach servo to pin
- *    - Map control output (0-100%) to servo angle
- *    - Add position limits
- *    - Test retract/deploy on ground
- * 
- * 5. TESTING & VALIDATION:
- *    - Bench test all sensors
- *    - Validate phase transitions with recorded data
- *    - Test Kalman filters with simulated flight
- *    - Tune PID gains in simulation
- *    - Low-altitude test flights
- *    - Full-scale test flight
- */
