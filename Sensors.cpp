@@ -1,8 +1,8 @@
 /*
  * ============================================================================
- * SENSORS - Implementation File
+ * SENSORS - Simple Direct Read (Like Python)
  * ============================================================================
- * Handles all sensor initialization, reading, and calibration
+ * Just read the sensors when you need them. No timers, no ISRs, no cache.
  */
 
 #include "Sensors.h"
@@ -10,20 +10,22 @@
 #include "Logger.h"
 
 // ============================================================================
-// GLOBAL VARIABLES
+// GLOBAL OBJECTS
 // ============================================================================
 
-MTi *imu = NULL;
+MTi *imu = nullptr;
 Adafruit_BMP3XX baro;
+
+// ============================================================================
+// IMU STATE
+// ============================================================================
 
 float imuTare[6] = {0.0f};
 bool imuTared = false;
-
 float groundAltitude = 0.0f;
 
-
 // ============================================================================
-// IMU FUNCTIONS
+// IMU INITIALIZATION
 // ============================================================================
 
 bool initializeIMU() {
@@ -32,12 +34,12 @@ bool initializeIMU() {
 
     pinMode(IMU_DRDY_PIN, INPUT);
     imu = new MTi(IMU_ADDRESS, IMU_DRDY_PIN);
-    
+
     if (!imu->detect(1000)) {
-        DEBUG_PRINTLN("ERROR: IMU not detected! Check connections.");
+        DEBUG_PRINTLN("ERROR: IMU not detected!");
         return false;
     }
-    
+
     imu->goToConfig();
     delay(100);
     imu->requestDeviceInfo();
@@ -46,45 +48,42 @@ bool initializeIMU() {
     delay(100);
     imu->goToMeasurement();
     delay(100);
-
-    // Give IMU time to start producing data
     delay(500);
-    
+
     DEBUG_PRINTLN("IMU initialized!");
     logDebugMessage("IMU initialized!");
-    
     return true;
 }
 
+// ============================================================================
+// IMU TARE
+// ============================================================================
+
 void performIMUTare() {
-    DEBUG_PRINTLN("Performing IMU tare (bias removal)...");
-    DEBUG_PRINTLN("Keep sensor stationary for 3 seconds...");
+    DEBUG_PRINTLN("Performing IMU tare...");
     logDebugMessage("Performing IMU tare...");
-    
-    int samples = 0;
-    unsigned long tareStart = millis();
+
     float sum[6] = {0};
-    
-    while (millis() - tareStart < 3000) {
-        if (digitalRead(IMU_DRDY_PIN)) {  // Check DRDY first!
+    int samples = 0;
+    unsigned long start = millis();
+
+    while (millis() - start < 3000) {
+        if (digitalRead(IMU_DRDY_PIN)) {
             imu->readMessages();
-            float* acc = imu->getAcceleration();
-            float* gyro = imu->getRateOfTurn();
-            
-            // Only add if valid (not NaN or extreme values)
-            if (abs(acc[0]) < 50 && abs(acc[1]) < 50 && abs(acc[2]) < 50) {
-                sum[0] += acc[0];
-                sum[1] += acc[1];
-                sum[2] += acc[2];
-                sum[3] += gyro[0];
-                sum[4] += gyro[1];
-                sum[5] += gyro[2];
-                samples++;
-            }
+            float *acc  = imu->getAcceleration();
+            float *gyro = imu->getRateOfTurn();
+
+            sum[0] += acc[0];
+            sum[1] += acc[1];
+            sum[2] += acc[2];
+            sum[3] += gyro[0];
+            sum[4] += gyro[1];
+            sum[5] += gyro[2];
+            samples++;
         }
-        delay(10);  // Wait for next data ready
+        delay(10);
     }
-    
+
     if (samples > 0) {
         for (int i = 0; i < 6; i++) {
             imuTare[i] = sum[i] / samples;
@@ -109,63 +108,64 @@ void performIMUTare() {
     }
 }
 
-void readIMU(State& currentState) {
-    if (imu && digitalRead(IMU_DRDY_PIN)) {
-        imu->readMessages();
-        
-        float* acc = imu->getAcceleration();
-        float* gyro = imu->getRateOfTurn();
-        
-        // Apply tare (bias removal)
-        if (imuTared) {
-            currentState.accelX = acc[0] - imuTare[0];
-            currentState.accelY = acc[1] - imuTare[1];
-            currentState.accelZ = acc[2] - imuTare[2];
-            currentState.gyroX = gyro[0] - imuTare[3];
-            currentState.gyroY = gyro[1] - imuTare[4];
-            currentState.gyroZ = gyro[2] - imuTare[5];
-        } else {
-            currentState.accelX = acc[0];
-            currentState.accelY = acc[1];
-            currentState.accelZ = acc[2];
-            currentState.gyroX = gyro[0];
-            currentState.gyroY = gyro[1];
-            currentState.gyroZ = gyro[2];
-        }
-        
-        VERBOSE_PRINT("IMU: ax=");
-        VERBOSE_PRINT(currentState.accelX);
-        VERBOSE_PRINT(" ay=");
-        VERBOSE_PRINT(currentState.accelY);
-        VERBOSE_PRINT(" az=");
-        VERBOSE_PRINTLN(currentState.accelZ);
+// ============================================================================
+// READ IMU - Just read it when called
+// ============================================================================
+
+void readIMU(State &currentState) {
+    if (!imu) return;
+    
+    // Only read if data is ready
+    if (!digitalRead(IMU_DRDY_PIN)) return;
+    
+    imu->readMessages();
+    
+    float *acc  = imu->getAcceleration();
+    float *gyro = imu->getRateOfTurn();
+    
+    if (imuTared) {
+        currentState.accelX = acc[0] - imuTare[0];
+        currentState.accelY = acc[1] - imuTare[1];
+        currentState.accelZ = acc[2] - imuTare[2];
+        currentState.gyroX  = gyro[0] - imuTare[3];
+        currentState.gyroY  = gyro[1] - imuTare[4];
+        currentState.gyroZ  = gyro[2] - imuTare[5];
+    } else {
+        currentState.accelX = acc[0];
+        currentState.accelY = acc[1];
+        currentState.accelZ = acc[2];
+        currentState.gyroX  = gyro[0];
+        currentState.gyroY  = gyro[1];
+        currentState.gyroZ  = gyro[2];
     }
 }
 
 // ============================================================================
-// BAROMETER FUNCTIONS
+// BAROMETER INITIALIZATION
 // ============================================================================
 
 bool initializeBarometer() {
     DEBUG_PRINTLN("Initializing Barometer...");
     logDebugMessage("Initializing Barometer...");
-    
+
     if (!baro.begin_I2C()) {
-        DEBUG_PRINTLN("ERROR: BMP390 not detected! Check connections.");
+        DEBUG_PRINTLN("ERROR: BMP390 not detected!");
         return false;
     }
-    
-    // Configure BMP390 for high performance
-    baro.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
-    baro.setPressureOversampling(BMP3_OVERSAMPLING_32X);
+
+    baro.setTemperatureOversampling(BMP3_OVERSAMPLING_2X);
+    baro.setPressureOversampling(BMP3_OVERSAMPLING_8X);
     baro.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
     baro.setOutputDataRate(BMP3_ODR_100_HZ);
-    
+
     DEBUG_PRINTLN("Barometer initialized!");
     logDebugMessage("Barometer initialized!");
-    
     return true;
 }
+
+// ============================================================================
+// BAROMETER TARE
+// ============================================================================
 
 void performBarometerTare() {
     DEBUG_PRINTLN("Reading ground altitude...");
@@ -209,17 +209,25 @@ void performBarometerTare() {
     }
 }
 
-void readBarometer(State& currentState) {
+// ============================================================================
+// READ BAROMETER - Just read it when called
+// ============================================================================
+
+void readBarometer(State &currentState) {
+    static unsigned long lastRead = 0;
+    unsigned long now = millis();
+    
+    // Rate limit to 100 Hz (10ms) to avoid overwhelming I2C
+    if (now - lastRead < 10) return;
+    lastRead = now;
+    
     if (!baro.performReading()) {
-        DEBUG_PRINTLN("Failed to read barometer!");
+        DEBUG_PRINTLN("Baro read failed");
         return;
     }
     
-    currentState.baroAltitude = baro.readAltitude(1013.25);  // Sea level pressure
-    currentState.baroPressure = baro.pressure / 100.0f;      // Convert Pa to hPa
+    // Just like Python: bmp.altitude, bmp.pressure, bmp.temperature
+    currentState.baroAltitude    = baro.readAltitude(1013.25f);
+    currentState.baroPressure    = baro.pressure / 100.0f;
     currentState.baroTemperature = baro.temperature;
-    
-    VERBOSE_PRINT("Baro: ");
-    VERBOSE_PRINT(currentState.baroAltitude);
-    VERBOSE_PRINTLN(" m");
 }
