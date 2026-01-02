@@ -46,16 +46,6 @@ using namespace Eigen;
 unsigned long loggingStartTime = 0;
 
 // ============================================================================
-// CONTROL CONFIGURATION
-// ============================================================================
-
-// TODO: PID gains
-// #define PID_KP 1.0
-// #define PID_KI 0.1
-// #define PID_KD 0.05
-// #define TARGET_APOGEE 4600.0  // meters AGL
-
-// ============================================================================
 // GLOBAL OBJECTS
 // ============================================================================
 
@@ -303,26 +293,26 @@ void loop() {
     updateFlightPhase(currentState, groundAltitude, KF);
 
         // Run controller
-        static float lastPredictedApogee = 0.0f;
+        static float lastPrediction = 0.0f;
         float flapAngle = ACS.update(currentState, currentPhase);
     
-        // Command servo (TODO: implement)
-        // servo.write(map(flapAngle, 0, 45, 0, 180));
+        // Command servo (TODO)
     
-        // Debug output
-           // Only print when prediction changes (means controller ran)
+        // Log when prediction changes (means controller ran)
         if (ACS.isControlActive()) {
-            float currentPrediction = ACS.getPredictedApogee();
+            float newPrediction = ACS.getPredictedApogee();
         
-        if (currentPrediction != lastPredictedApogee) {
-            DEBUG_PRINT("Pred Apogee: "); DEBUG_PRINT(currentPrediction);
-            DEBUG_PRINT(" | Error: "); DEBUG_PRINT(ACS.getApogeeError());
-            DEBUG_PRINT(" | Flap: "); DEBUG_PRINT(flapAngle);
-            DEBUG_PRINT(" | Sim Steps: "); DEBUG_PRINTLN(ACS.getSimulationSteps());
-            
-            lastPredictedApogee = currentPrediction;
+            if (newPrediction != lastPrediction) {
+                // LOG TO DEBUG FILE
+                String logMsg = "CONTROLLER | Pred Apogee: " + String(newPrediction, 2) + 
+                          " m | Error: " + String(ACS.getApogeeError(), 2) +
+                          " m | Flap: " + String(flapAngle, 1) + 
+                          " deg | Steps: " + String(ACS.getSimulationSteps());
+                logDebugMessage(logMsg.c_str());
+                Serial.println(logMsg); 
+                lastPrediction = newPrediction;
+            }
         }
-    }
 
         addLogEntry(currentState, currentPhase, groundAltitude, loggingStartTime);
    
