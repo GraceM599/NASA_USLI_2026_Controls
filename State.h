@@ -6,6 +6,7 @@ struct State {
     // IMU
     float accelX, accelY, accelZ;  // m/s²
     float gyroX, gyroY, gyroZ;     // rad/s
+    float roll, pitch, yaw;
     
     // Barometer
     float baroAltitude;            // meters

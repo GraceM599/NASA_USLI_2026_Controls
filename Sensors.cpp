@@ -8,7 +8,7 @@
 #include "Sensors.h"
 #include "Debug.h"
 #include "Logger.h"
-
+#include <cmath>
 // ============================================================================
 // GLOBAL OBJECTS
 // ============================================================================
@@ -20,7 +20,7 @@ Adafruit_BMP3XX baro;
 // IMU STATE
 // ============================================================================
 
-float imuTare[6] = {0.0f};
+float imuTare[9] = {0.0f};
 bool imuTared = false;
 float groundAltitude = 0.0f;
 
@@ -64,6 +64,9 @@ void performIMUTare() {
     logDebugMessage("Performing IMU tare...");
 
     float sum[6] = {0};
+    //default euler angles
+    float eulerSum[3] = {0};
+
     int samples = 0;
     unsigned long start = millis();
 
@@ -79,6 +82,12 @@ void performIMUTare() {
             sum[3] += gyro[0];
             sum[4] += gyro[1];
             sum[5] += gyro[2];
+
+
+            float *euler = imu->getEulerAngles();
+            eulerSum[0] += euler[0];
+            eulerSum[1] += euler[1];
+            eulerSum[2] += euler[2];
             samples++;
         }
         delay(10);
@@ -87,6 +96,9 @@ void performIMUTare() {
     if (samples > 0) {
         for (int i = 0; i < 6; i++) {
             imuTare[i] = sum[i] / samples;
+        }
+        for (int i = 0; i<3; i++) {
+            imuTare[i+6] = eulerSum[i] / samples;
         }
         imuTared = true;
         DEBUG_PRINTLN("IMU tare complete!");
@@ -122,7 +134,7 @@ void readIMU(State &currentState) {
     
     float *acc  = imu->getAcceleration();
     float *gyro = imu->getRateOfTurn();
-    
+    float *eulerAngle = imu->getEulerAngles();
     if (imuTared) {
         currentState.accelX = acc[0] - imuTare[0];
         currentState.accelY = acc[1] - imuTare[1];
@@ -130,6 +142,11 @@ void readIMU(State &currentState) {
         currentState.gyroX  = gyro[0] - imuTare[3];
         currentState.gyroY  = gyro[1] - imuTare[4];
         currentState.gyroZ  = gyro[2] - imuTare[5];
+
+        //imuTare[6-8] has the default values for this stuff but idk if its needed rn
+        currentState.roll = eulerAngle[0];
+        currentState.pitch = eulerAngle[1];
+        currentState.yaw = eulerAngle[2];
     } else {
         currentState.accelX = acc[0];
         currentState.accelY = acc[1];
@@ -137,9 +154,23 @@ void readIMU(State &currentState) {
         currentState.gyroX  = gyro[0];
         currentState.gyroY  = gyro[1];
         currentState.gyroZ  = gyro[2];
+
+        currentState.roll = eulerAngle[0];
+        currentState.pitch = eulerAngle[1];
+        currentState.yaw = eulerAngle[2];
     }
 }
+//not sure where this should go
+bool tooPitched(State &currentState) {
+    //some condition to see if the roll/pitch/yaw of the imu is a problem/past threshold
 
+    const float MAX_SAFE_PITCH = 30.0f;
+    if (std::abs(currentState.pitch) > MAX_SAFE_PITCH) {
+        return true; //if true then stop the servo
+    }
+    //imu_tare[index 3-5] has the rates if thats needed.
+    return false;
+}
 // ============================================================================
 // BAROMETER INITIALIZATION
 // ============================================================================

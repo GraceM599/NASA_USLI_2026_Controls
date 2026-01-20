@@ -16,6 +16,7 @@ extern float groundAltitude;
 bool initializeIMU();
 void performIMUTare();
 void readIMU(State& currentState);
+bool tooPitched(State &currentState);
 
 bool initializeBarometer();
 void performBarometerTare();
