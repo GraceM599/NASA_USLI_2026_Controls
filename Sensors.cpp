@@ -171,6 +171,15 @@ bool tooPitched(State &currentState) {
     //imu_tare[index 3-5] has the rates if thats needed.
     return false;
 }
+//To display the angles read
+void displayEulerAngles(State &currentState) {
+    DEBUG_PRINTLN("Roll: ", currentState.roll);
+    logDebugMessage("Roll: ", currentState.roll);
+    DEBUG_PRINTLN("Pitch: ", currentState.pitch);
+    logDebugMessage("Pitch: ", currentState.pitch);
+    DEBUG_PRINTLN("Yaw: ", currentState.yaw);
+    logDebugMessage("Yaw: ", currentState.yaw);
+}
 // ============================================================================
 // BAROMETER INITIALIZATION
 // ============================================================================
